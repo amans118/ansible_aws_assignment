@@ -1,0 +1,104 @@
+---
+
+- name: Create an ec2 instance
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+      region: us-west-2
+      instance_type: t2.micro
+      ami: ami-0d1cd67c26f5fca19
+      keypair: ans
+      group: ans-80
+      vpc_subnet_id: subnet-9a1eddc3
+      lb_name: ansibleLB
+
+  tasks:
+
+    - name: Create the ELB only listening over port 80
+      ec2_elb_lb:
+        aws_access_key: "{{ec2_access_key}}"
+        aws_secret_key: "{{ec2_secret_key}}"
+        name: "{{ lb_name }}"
+        state: present
+        region: "{{ region }}"
+        zones:
+          - us-west-2a
+          - us-west-2b
+        listeners:
+          - protocol: http
+            load_balancer_port: 80
+            instance_port: 80
+      register: elb
+
+    - name: Create an ec2 instance
+      ec2:
+         aws_access_key: "{{ec2_access_key}}"
+         aws_secret_key: "{{ec2_secret_key}}"
+         key_name: "{{ keypair }}"
+         group: "{{ group }}"
+         instance_type: "{{ instance_type }}"
+         image: "{{ ami }}"
+         wait: true
+         region: "{{ region }}"
+         count: 2
+         vpc_subnet_id: "{{ vpc_subnet_id }}"
+         assign_public_ip: yes
+         termination_protection: no
+      register: ec2
+
+    - name: saving EC2 instance IPs to run tasks against
+      add_host:
+        hostname: "{{ item.public_ip }}"
+        groupname: launched
+      loop: "{{ ec2.instances }}"
+
+    - name: Wait for SSH to come up
+      delegate_to: "{{ item.public_dns_name }}"
+      wait_for_connection:
+        timeout: 180
+      loop: "{{ ec2.instances }}"
+
+- hosts: launched
+  remote_user: ubuntu
+  become: True
+  vars:
+      n: 0
+  tasks:
+    - name: Install nginx
+      apt:
+        name: nginx
+        update_cache: yes
+        state: present
+        
+    - name: Increment
+      set_fact: n={{ n | int + 1 }}
+      
+    - name: Create default index page
+      copy:
+        src: index.html
+        dest: /var/www/html/index.html
+        
+    - name: Welcome message
+      lineinfile:
+        path: /var/www/html/index.html
+        line: "Hello from EC2 Instance{{ n }} server IP {{ inventory_hostname  }}"
+        state: present
+        
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+- hosts: localhost
+  tasks:
+
+    - name: Add each EC2 instance to the ELB
+      ec2_elb:
+        aws_access_key: "{{ec2_access_key}}"
+        aws_secret_key: "{{ec2_secret_key}}"
+        state: present
+        ec2_elbs: ansibleLB
+        region: us-west-2
+        instance_id: "{{ item.id }}"
+      loop: "{{ ec2.instances }}"
